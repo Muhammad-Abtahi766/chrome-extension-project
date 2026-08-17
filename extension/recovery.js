@@ -1,4 +1,4 @@
-const BACKEND_BASE = "http://127.0.0.1:8000";
+const BACKEND_BASE = "https://chrome-extension-project-blush.vercel.app";
 const BACKEND_URL = `${BACKEND_BASE}/process-meeting`;
 
 const statusEl = document.getElementById("status");

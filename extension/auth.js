@@ -6,7 +6,7 @@
 // That's it - no password is ever stored locally. Logging in again just
 // re-checks username+password against the backend and re-saves this object.
 
-const BACKEND_BASE = "http://127.0.0.1:8000";
+const BACKEND_BASE = "https://chrome-extension-project-blush.vercel.app";
 
 const authScreen = document.getElementById("authScreen");
 const appScreen = document.getElementById("appScreen");
