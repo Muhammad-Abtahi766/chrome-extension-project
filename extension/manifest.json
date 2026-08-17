@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Records meeting tab audio, sends it to a secure cloud backend for transcription, summarization, and CRM sync.",
   "permissions": ["tabCapture", "activeTab", "storage", "downloads", "unlimitedStorage"],
-  "host_permissions": ["https://chrome-extension-project-blush.vercel.app/*"],
+  "host_permissions": ["https://chrome-extension-project-production-a051.up.railway.app/*"],
   "background": {
     "service_worker": "background.js"
   },

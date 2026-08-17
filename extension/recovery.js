@@ -1,4 +1,4 @@
-const BACKEND_BASE = "https://chrome-extension-project-blush.vercel.app";
+const BACKEND_BASE = "https://chrome-extension-project-production-a051.up.railway.app";
 const BACKEND_URL = `${BACKEND_BASE}/process-meeting`;
 
 const statusEl = document.getElementById("status");
