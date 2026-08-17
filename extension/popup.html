@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Meeting Summarizer</title>
+<style>
+  body {
+    width: 320px;
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1c2b39;
+    color: #f5f0e6;
+  }
+  h1 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+  h2 { font-size: 14px; margin: 0 0 14px; }
+  .headerRow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .headerRow h1 { margin: 0; }
+  #settingsBtn {
+    flex: none; width: 28px; height: 28px; padding: 0; border-radius: 6px;
+    background: #24384a; color: #d9cfb8; font-size: 15px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #settingsBtn:hover { background: #2c4356; }
+
+  /* ---------- Auth screen ---------- */
+  #authScreen { display: none; }
+  #authScreen .tagline { font-size: 12px; color: #b8c4cf; margin-bottom: 16px; line-height: 1.4; }
+  .fieldLabel { display: block; font-size: 11px; color: #b8c4cf; margin-bottom: 4px; }
+  .textInput {
+    width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid #3a4a58; background: #24384a; color: #f5f0e6; font-size: 13px;
+    margin-bottom: 12px;
+  }
+  #authError {
+    display: none; font-size: 12px; color: #e08a8a; margin-bottom: 10px; line-height: 1.4;
+  }
+  .primaryBtn { width: 100%; padding: 10px 12px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; background: #6e2a2a; color: #f5f0e6; }
+  .primaryBtn:disabled { opacity: 0.5; cursor: default; }
+  #authToggleRow { text-align: center; margin-top: 12px; font-size: 12px; color: #b8c4cf; }
+  #authToggleBtn { background: none; border: none; color: #d9a06b; cursor: pointer; font-size: 12px; padding: 0; text-decoration: underline; }
+
+  /* ---------- Main app ---------- */
+  #appScreen { display: none; }
+  #settingsOverlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 10;
+  }
+  #settingsOverlay.open { display: block; }
+  #settingsPanel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 280px;
+    background: #1c2b39; border-left: 1px solid #3a4a58; padding: 16px;
+    box-sizing: border-box; overflow-y: auto;
+  }
+  .settingsCloseBtn {
+    float: right; background: none; border: none; color: #b8c4cf; font-size: 16px;
+    cursor: pointer; padding: 0; flex: none; width: auto;
+  }
+  .settingsSection { margin-bottom: 16px; }
+  #accountRow { font-size: 12px; color: #b8c4cf; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #3a4a58; display: flex; align-items: center; justify-content: space-between; }
+  #accountUsername { color: #f5f0e6; font-weight: 600; }
+  #logoutBtn { flex: none; padding: 5px 9px; font-size: 11px; background: #24384a; color: #d9a06b; border: 1px solid #3a4a58; border-radius: 6px; cursor: pointer; }
+
+  /* Reusable "key row" pattern for Groq + HubSpot keys */
+  .keyRow {
+    padding: 10px; border-radius: 6px; background: #24384a; border: 1px solid #3a4a58;
+  }
+  .keyRow .keyRowHeader { display: flex; align-items: center; justify-content: space-between; }
+  .keyRow .keyTitle { font-size: 12px; font-weight: 600; }
+  .keyRow .keyStatus { font-size: 11px; margin-top: 2px; }
+  .keyRow .keyStatus.set { color: #7bc47f; }
+  .keyRow .keyStatus.notSet { color: #d9a06b; }
+  .keyRow .keyEditBtn { flex: none; padding: 5px 9px; font-size: 11px; background: #2c4356; color: #f5f0e6; border: none; border-radius: 6px; cursor: pointer; }
+  .keyRow .keyEditForm { display: none; margin-top: 10px; }
+  .keyRow .keyEditForm.open { display: block; }
+  .keyRow .keyEditForm input {
+    width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid #3a4a58; background: #1c2b39; color: #f5f0e6; font-size: 12px; margin-bottom: 6px;
+  }
+  .keyRow .keyEditForm .keyEditBtns { display: flex; gap: 6px; }
+  .keyRow .keyEditForm button { flex: 1; padding: 6px 8px; font-size: 11px; border: none; border-radius: 6px; cursor: pointer; }
+  .keyRow .keyEditForm .keySaveBtn { background: #6e2a2a; color: #f5f0e6; }
+  .keyRow .keyEditForm .keyCancelBtn { background: #2c4356; color: #d9cfb8; }
+  .keyRow .keyHint { font-size: 10.5px; color: #8b98a3; margin-top: 6px; line-height: 1.4; }
+
+  #saveLocallyRow, #saveAudioRow {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 12px; padding: 8px 10px; border-radius: 6px;
+    background: #24384a; border: 1px solid #3a4a58;
+  }
+  #saveLocallyRow label, #saveAudioRow label { font-size: 12px; cursor: pointer; }
+  #saveLocallyCheckbox, #saveAudioCheckbox { cursor: pointer; }
+  #recoveryBanner {
+    display: none; margin-bottom: 12px; padding: 8px 10px; border-radius: 6px;
+    background: #4a3a24; border: 1px solid #9c7c3f; font-size: 12px; line-height: 1.4;
+  }
+  #recoveryBanner button {
+    margin-top: 6px; width: 100%; padding: 6px 8px; font-size: 11px;
+    background: #9c7c3f; color: #1c2b39; border: none; border-radius: 6px; cursor: pointer;
+  }
+  #groqKeyMissingBanner {
+    display: none; margin-bottom: 12px; padding: 8px 10px; border-radius: 6px;
+    background: #3a2424; border: 1px solid #6e2a2a; font-size: 12px; line-height: 1.4;
+  }
+  #groqKeyMissingBanner button {
+    margin-top: 6px; width: 100%; padding: 6px 8px; font-size: 11px;
+    background: #6e2a2a; color: #f5f0e6; border: none; border-radius: 6px; cursor: pointer;
+  }
+  #status { font-size: 13px; color: #b8c4cf; margin-bottom: 10px; min-height: 34px; line-height: 1.5; }
+  #timer { font-size: 28px; font-weight: 600; text-align: center; margin: 10px 0; font-variant-numeric: tabular-nums; }
+  .buttons { display: flex; gap: 8px; }
+  button { font-family: inherit; }
+  .buttons button { flex: 1; padding: 10px 12px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  #startBtn { background: #6e2a2a; color: #f5f0e6; }
+  #stopBtn { background: #9c7c3f; color: #1c2b39; }
+  .buttons button:disabled { opacity: 0.4; cursor: default; }
+  #result {
+    margin-top: 14px; font-size: 12px; color: #d9cfb8; white-space: pre-wrap;
+    max-height: 220px; overflow-y: auto; border-top: 1px solid #3a4a58;
+    padding-top: 10px; display: none;
+  }
+  #micRow { margin-bottom: 12px; }
+  #micRow label { display: block; font-size: 11px; color: #b8c4cf; margin-bottom: 4px; }
+  #micSelect {
+    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid #3a4a58;
+    background: #24384a; color: #f5f0e6; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= AUTH SCREEN (shown when nobody's logged in) ================= -->
+<div id="authScreen">
+  <h1>Meeting Summarizer</h1>
+  <div class="tagline">Log in or create an account. Your Groq and HubSpot keys are saved to your account, so they follow you to any computer.</div>
+
+  <div id="authError"></div>
+
+  <label class="fieldLabel" for="authUsername">Username</label>
+  <input type="text" id="authUsername" class="textInput" autocomplete="username" placeholder="e.g. jordan_smith">
+
+  <label class="fieldLabel" for="authPassword">Password</label>
+  <input type="password" id="authPassword" class="textInput" autocomplete="current-password" placeholder="At least 8 characters">
+
+  <button id="authSubmitBtn" class="primaryBtn">Log in</button>
+
+  <div id="authToggleRow">
+    <span id="authToggleText">Don't have an account?</span>
+    <button id="authToggleBtn">Register</button>
+  </div>
+</div>
+
+<!-- ================= MAIN APP (shown once logged in) ================= -->
+<div id="appScreen">
+  <div class="headerRow">
+    <h1>Meeting Summarizer</h1>
+    <button id="settingsBtn" title="Settings">&#9881;</button>
+  </div>
+
+  <div id="settingsOverlay">
+    <div id="settingsPanel">
+      <button id="settingsCloseBtn" class="settingsCloseBtn">&times;</button>
+      <h2>Settings</h2>
+
+      <div id="accountRow">
+        Logged in as <span id="accountUsername"></span>
+        <button id="logoutBtn">Log out</button>
+      </div>
+
+      <div class="settingsSection">
+        <div class="keyRow" id="groqKeyRow">
+          <div class="keyRowHeader">
+            <div>
+              <div class="keyTitle">Groq API key</div>
+              <div class="keyStatus" id="groqKeyStatus">Checking...</div>
+            </div>
+            <button class="keyEditBtn" id="groqKeyEditToggle">Edit</button>
+          </div>
+          <div class="keyEditForm" id="groqKeyEditForm">
+            <input type="password" id="groqKeyInput" placeholder="gsk_...">
+            <div class="keyEditBtns">
+              <button class="keySaveBtn" id="groqKeySaveBtn">Save</button>
+              <button class="keyCancelBtn" id="groqKeyCancelBtn">Cancel</button>
+            </div>
+          </div>
+          <div class="keyHint">Required to start recording. Get a free key at console.groq.com/keys.</div>
+        </div>
+      </div>
+
+      <div class="settingsSection">
+        <div class="keyRow" id="hubspotKeyRow">
+          <div class="keyRowHeader">
+            <div>
+              <div class="keyTitle">HubSpot API key</div>
+              <div class="keyStatus" id="hubspotKeyStatus">Checking...</div>
+            </div>
+            <button class="keyEditBtn" id="hubspotKeyEditToggle">Edit</button>
+          </div>
+          <div class="keyEditForm" id="hubspotKeyEditForm">
+            <input type="password" id="hubspotKeyInput" placeholder="pat-na2-...">
+            <div class="keyEditBtns">
+              <button class="keySaveBtn" id="hubspotKeySaveBtn">Save</button>
+              <button class="keyCancelBtn" id="hubspotKeyCancelBtn">Cancel</button>
+            </div>
+          </div>
+          <div class="keyHint">Optional — meeting summaries get pushed here if set. In HubSpot: Settings &rarr; Integrations &rarr; Private Apps &rarr; Create a private app &rarr; grant CRM notes read/write &rarr; copy the token.</div>
+        </div>
+      </div>
+
+      <div class="settingsSection" id="saveLocallyRow">
+        <input type="checkbox" id="saveLocallyCheckbox">
+        <label for="saveLocallyCheckbox">Save summary as PDF on this computer</label>
+      </div>
+
+      <div class="settingsSection" id="saveAudioRow">
+        <input type="checkbox" id="saveAudioCheckbox">
+        <label for="saveAudioCheckbox">Save raw audio recording on this computer</label>
+      </div>
+    </div>
+  </div>
+
+  <div id="groqKeyMissingBanner">
+    A Groq API key is required before you can record. Enter yours in Settings.
+    <button id="openSettingsForKeyBtn">Open Settings</button>
+  </div>
+  <div id="recoveryBanner">
+    We found an unfinished recording from earlier that never got processed.
+    <button id="recoverBtn">Recover it now</button>
+  </div>
+  <div id="status">Idle. Open a Google Meet or Zoom tab, then press Start.</div>
+  <div id="micRow">
+    <label for="micSelect">Microphone</label>
+    <select id="micSelect"><option value="">Loading microphones...</option></select>
+  </div>
+  <div id="timer">00:00</div>
+  <div class="buttons">
+    <button id="startBtn" disabled>Start recording</button>
+    <button id="stopBtn" disabled>Stop &amp; process</button>
+  </div>
+  <div id="result"></div>
+</div>
+
+<script src="session-utils.js"></script>
+<script src="auth.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

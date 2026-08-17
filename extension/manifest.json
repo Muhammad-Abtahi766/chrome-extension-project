@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Meeting Summarizer & CRM Sync",
+  "version": "1.0.0",
+  "description": "Records meeting tab audio, sends it to a local Python backend for transcription, summarization, and CRM sync.",
+  "permissions": ["tabCapture", "activeTab", "storage", "scripting", "downloads", "unlimitedStorage"],
+  "host_permissions": ["http://127.0.0.1:8000/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Meeting Summarizer"
+  }
+}

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Recovering Recording</title>
+<style>
+  body {
+    width: 320px;
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1c2b39;
+    color: #f5f0e6;
+  }
+  h1 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+  #status {
+    font-size: 13px; color: #d9cfb8; white-space: pre-wrap; line-height: 1.5;
+    max-height: 320px; overflow-y: auto;
+  }
+  .buttons { display: flex; gap: 8px; margin-top: 14px; }
+  button { flex: 1; padding: 10px 12px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  #retryBtn { background: #6e2a2a; color: #f5f0e6; }
+  #closeBtn { background: #9c7c3f; color: #1c2b39; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <h1>Recovering Interrupted Recording</h1>
+  <div id="status">Checking for unsaved recording...</div>
+  <div class="buttons">
+    <button id="retryBtn" class="hidden">Retry</button>
+    <button id="closeBtn">Close</button>
+  </div>
+
+<script src="session-utils.js"></script>
+<script src="recovery.js"></script>
+</body>
+</html>

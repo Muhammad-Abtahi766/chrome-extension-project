@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydub
+requests
+python-dotenv
+python-multipart
+fpdf2
+langchain-groq
+supabase
+bcrypt
