@@ -110,8 +110,8 @@ async function runRecovery() {
   } else {
     setStatus(
       "Recovery upload failed: " + result.error +
-      "\n\nYour audio is still safely saved - nothing was lost. Make sure the backend " +
-      "(python main.py) is running, then press Retry."
+      "\n\nYour audio is still safely saved - nothing was lost. " +
+      "Please check your internet connection, then press Retry."
     );
     retryBtn.classList.remove("hidden");
   }

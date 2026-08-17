@@ -80,7 +80,7 @@ authSubmitBtn.addEventListener("click", async () => {
   } catch (err) {
     showAuthError(
       err.message.includes("fetch")
-        ? "Can't reach the backend. Make sure it's running (python main.py)."
+        ? "Can't reach the backend. Please check your internet connection and try again."
         : err.message
     );
   } finally {

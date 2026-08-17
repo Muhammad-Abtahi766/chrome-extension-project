@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Meeting Summarizer & CRM Sync",
   "version": "1.0.0",
-  "description": "Records meeting tab audio, sends it to a local Python backend for transcription, summarization, and CRM sync.",
-  "permissions": ["tabCapture", "activeTab", "storage", "scripting", "downloads", "unlimitedStorage"],
+  "description": "Records meeting tab audio, sends it to a secure cloud backend for transcription, summarization, and CRM sync.",
+  "permissions": ["tabCapture", "activeTab", "storage", "downloads", "unlimitedStorage"],
   "host_permissions": ["https://chrome-extension-project-blush.vercel.app/*"],
   "background": {
     "service_worker": "background.js"
