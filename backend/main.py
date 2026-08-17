@@ -89,8 +89,19 @@ logger = logging.getLogger(__name__)
 
 # ElevenLabs is now used for transcription (Scribe v2) instead of Groq Whisper.
 # Groq is still used below, but only for the GPT-OSS 120B summarization step.
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_API_KEY = (os.getenv("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+
+# Diagnostic only — never logs the key itself, just its shape, so a bad
+# Railway paste (trailing newline, wrapped quotes, stale value) is provable
+# from the deploy logs instead of guessed at.
+if ELEVENLABS_API_KEY:
+    logger.info(
+        f"ELEVENLABS_API_KEY loaded: length={len(ELEVENLABS_API_KEY)}, "
+        f"starts_with={ELEVENLABS_API_KEY[:4]!r}, ends_with={ELEVENLABS_API_KEY[-4:]!r}"
+    )
+else:
+    logger.warning("ELEVENLABS_API_KEY is empty or not set.")
 
 # --- Supabase (accounts + per-user API keys) ---
 # HubSpot no longer uses OAuth (no client ID/secret, no redirect flow). Each
