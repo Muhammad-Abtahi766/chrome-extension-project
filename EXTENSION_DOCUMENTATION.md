@@ -2,7 +2,7 @@
 
 A Manifest V3 Chrome extension: records meeting tab audio, sends it to the local Python backend (`http://127.0.0.1:8000`) for transcription/summarization/CRM sync, and shows the result.
 
-**Files covered:** `manifest.json`, `background.js`, `popup.html`, `popup.js`, `session-utils.js`, `recovery.html`, `recovery.js`.
+**Files covered:** `manifest.json`, `background.js`, `popup.html`, `auth.js`, `popup.js`, `session-utils.js`, `recovery.html`, `recovery.js`.
 
 ---
 
@@ -26,9 +26,9 @@ A Manifest V3 Chrome extension: records meeting tab audio, sends it to the local
 | `manifest_version: 3` | Uses the current Chrome extension platform (MV3) — background logic runs as a **service worker**, not a persistent background page. |
 | `permissions.tabCapture` | Lets the extension capture audio from a specific browser tab (`chrome.tabCapture`). |
 | `permissions.activeTab` | Grants temporary access to the currently active tab when the user interacts with the extension. |
-| `permissions.storage` | Enables `chrome.storage.local` — used everywhere for settings, session state, and IDs. |
+| `permissions.storage` | Enables `chrome.storage.local` — used everywhere for the logged-in session, recording preferences, and session state. |
 | `permissions.scripting` | Reserved for script-injection capability (declared, available if needed). |
-| `permissions.downloads` | Needed for `chrome.downloads.download(...)` — used to save the generated PDF locally. |
+| `permissions.downloads` | Needed for `chrome.downloads.download(...)` — used to save the generated PDF and/or raw audio locally. |
 | `permissions.unlimitedStorage` | Lifts the default storage quota — relevant since IndexedDB may hold hours of audio chunks per session. |
 | `host_permissions` | Restricts network access to exactly the local backend (`127.0.0.1:8000`) — the extension can't silently call any other host. |
 | `background.service_worker` | Registers `background.js` as the MV3 service worker (event-driven, can be killed/restarted by Chrome at any time — this matters, see Section 2). |
@@ -38,7 +38,7 @@ A Manifest V3 Chrome extension: records meeting tab audio, sends it to the local
 
 ## 2. `background.js` — Service Worker
 
-**Why this file exists at all, and why capture logic is NOT here:** `chrome.tabCapture.capture()` must be called from an extension view (like a popup or window) in direct response to a user gesture — it can't be called from a service worker. So `background.js` only handles orchestration: opening/tracking the recorder window, badge state, and crash recovery. The actual capture/recording logic lives in `popup.js`.
+**Why this file exists at all, and why capture logic is NOT here:** `chrome.tabCapture.getMediaStreamId()`/capture must be driven from an extension view (like a popup or window) in direct response to a user gesture — it can't be called from a service worker. So `background.js` only handles orchestration: opening/tracking the recorder window, badge state, and crash recovery. The actual capture/recording logic lives in `popup.js`.
 
 ### Install-time setup
 ```javascript
@@ -112,7 +112,7 @@ chrome.windows.onRemoved.addListener(async (closedWindowId) => {
 ```
 Fires whenever **any** browser window closes; the listener filters to only care if it was specifically the tracked recorder window (`stored.recorderWindowId === closedWindowId`).
 - Clears the stored window ID either way (it's gone now).
-- **The actual recovery trigger:** if there was an `activeSession` and its `phase` wasn't `"done"` — meaning a recording or an in-progress upload was still active when the window closed (crash, accidental click, browser hiccup) — it opens a small `recovery.html` popup window, passing the session ID. The comment in the code frames the intent well: *"A closed window doesn't mean a lost meeting"* — because audio was already being incrementally saved to IndexedDB as it was captured (see `session-utils.js`, Section 5), so `recovery.html` can pick up where things left off.
+- **The actual recovery trigger:** if there was an `activeSession` and its `phase` wasn't `"done"` — meaning a recording or an in-progress upload was still active when the window closed (crash, accidental click, browser hiccup) — it opens a small `recovery.html` popup window, passing the session ID. The comment in the code frames the intent well: *"A closed window doesn't mean a lost meeting"* — because audio was already being incrementally saved to IndexedDB as it was captured (see `session-utils.js`, Section 6), so `recovery.html` can pick up where things left off.
 
 ### `chrome.runtime.onMessage` — session state tracking
 ```javascript
@@ -145,53 +145,252 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 Structure (not a "popup" in the MV3 auto-closing sense — it's the content of the persistent window `background.js` opens):
 
-- **Header row**: title + a gear (`⚙`) settings button (`#settingsBtn`).
-- **Settings overlay** (`#settingsOverlay` → `#settingsPanel`): a slide-in panel containing:
-  - HubSpot connection status text + "Connect HubSpot" button (`#crmRow`).
-  - "Save summary as PDF on this computer" checkbox (`#saveLocallyRow`).
-  - Groq API key input (`#groqKeyInput`, `type="password"`, marked **required**) with hint text and a "Saved." confirmation note that fades in after saving.
-- **`#groqKeyMissingBanner`**: hidden by default; shown when no Groq key is set, blocking recording, with an "Open Settings" shortcut button.
-- **`#recoveryBanner`**: hidden by default; shown when `popup.js` detects an unfinished prior session, with a "Recover it now" button.
-- **`#status`**: main status line, updated throughout the recording/upload lifecycle.
-- **`#micRow`**: a `<select>` (`#micSelect`) populated dynamically with real microphone device names.
-- **`#timer`**: `MM:SS` elapsed-recording display.
-- **Buttons**: `#startBtn` ("Start recording", disabled until a Groq key is present) and `#stopBtn` ("Stop & process", disabled until recording starts).
-- **`#result`**: hidden by default; shows the final summary text plus CRM/PDF status after processing completes.
+- **`#authScreen`** (shown when nobody's logged in): a tagline explaining that Groq/HubSpot keys are saved to the account, a username field, a password field, a submit button (`#authSubmitBtn`, label toggles between "Log in"/"Create account"), an error area (`#authError`), and a Register/Log in toggle link (`#authToggleBtn`/`#authToggleText`).
+- **`#appScreen`** (shown once logged in):
+  - **Header row**: title + a gear (`⚙`) settings button (`#settingsBtn`).
+  - **Settings overlay** (`#settingsOverlay` → `#settingsPanel`): a slide-in panel containing:
+    - **`#accountRow`**: "Logged in as `<username>`" plus a Log out button (`#logoutBtn`).
+    - **Groq API key row** (`#groqKeyRow`): status text (`#groqKeyStatus`, "Key saved" / "Not set"), an Edit toggle button, and a collapsible edit form (`#groqKeyEditForm`) with a password-type input, Save and Cancel buttons, and hint text pointing to console.groq.com.
+    - **HubSpot API key row** (`#hubspotKeyRow`): identical pattern, marked optional, with hint text walking through generating a HubSpot Private App token.
+    - **`#saveLocallyRow`**: "Save summary as PDF on this computer" checkbox.
+    - **`#saveAudioRow`**: "Save raw audio recording on this computer" checkbox.
+  - **`#groqKeyMissingBanner`**: hidden by default; shown when the account has no Groq key set, blocking recording, with an "Open Settings" shortcut button.
+  - **`#recoveryBanner`**: hidden by default; shown when `popup.js` detects an unfinished prior session, with a "Recover it now" button.
+  - **`#status`**: main status line, updated throughout the recording/upload lifecycle.
+  - **`#micRow`**: a `<select>` (`#micSelect`) populated dynamically with real microphone device names.
+  - **`#timer`**: `MM:SS` elapsed-recording display.
+  - **Buttons**: `#startBtn` ("Start recording", disabled until the account has a Groq key) and `#stopBtn` ("Stop & process", disabled until recording starts).
+  - **`#result`**: hidden by default; shows the final summary text plus CRM/PDF status after processing completes.
 
-Two scripts are loaded in order at the bottom: `session-utils.js` then `popup.js` — order matters because `popup.js` calls functions (`saveChunkToDB`, `loadChunksFromDB`, `uploadRecording`, etc.) defined in `session-utils.js`.
+Three scripts are loaded in order at the bottom: `session-utils.js`, then `auth.js`, then `popup.js`. Order matters twice over: `auth.js` and `popup.js` both call functions (`saveChunkToDB`, `loadChunksFromDB`, `uploadRecording`, `saveAudioLocally`) defined in `session-utils.js`; and `auth.js` must load before `popup.js` so that `popup.js`'s `onAppScreenReady()` function already exists by the time `auth.js`'s `enterAppScreen()` might call it for an already-logged-in user on page load.
 
 Visual styling is a dark navy/cream theme (`#1c2b39` background, `#f5f0e6` text) with maroon/gold accent buttons — purely cosmetic, no functional impact.
 
 ---
 
-## 4. `popup.js` — Recording, Upload, and Settings Logic
+## 4. `auth.js` — Account Login/Register + Settings Key Editor
 
-### Element references (top of file)
+**Why this exists as its own file:** account/session management and the settings panel's key-editing UI are shared "groundwork" needed before any recording logic can run — `popup.js` depends on knowing who's logged in (`getCurrentUserId()`) and whether a Groq key is set (`hasGroqKey`) before its own `onAppScreenReady()` does anything.
+
+### Session shape
 ```javascript
 const BACKEND_BASE = "http://127.0.0.1:8000";
-const BACKEND_URL = `${BACKEND_BASE}/process-meeting`;
-
-const startBtn = document.getElementById("startBtn");
-const stopBtn = document.getElementById("stopBtn");
-const statusEl = document.getElementById("status");
-const timerEl = document.getElementById("timer");
-const resultEl = document.getElementById("result");
-const micSelectEl = document.getElementById("micSelect");
-const crmStatusTextEl = document.getElementById("crmStatusText");
-const connectHubspotBtn = document.getElementById("connectHubspotBtn");
-const saveLocallyCheckbox = document.getElementById("saveLocallyCheckbox");
-const recoveryBanner = document.getElementById("recoveryBanner");
-const recoverBtn = document.getElementById("recoverBtn");
-const groqKeyInput = document.getElementById("groqKeyInput");
-const groqKeySavedNote = document.getElementById("groqKeySavedNote");
-const groqKeyMissingBanner = document.getElementById("groqKeyMissingBanner");
-const openSettingsForKeyBtn = document.getElementById("openSettingsForKeyBtn");
-const settingsBtn = document.getElementById("settingsBtn");
-const settingsOverlay = document.getElementById("settingsOverlay");
-const settingsPanel = document.getElementById("settingsPanel");
-const settingsCloseBtn = document.getElementById("settingsCloseBtn");
 ```
-Grabs a reference to every interactive/status element in `popup.html` once, up front. *(Note: the `settingsBtn`/`settingsOverlay`/`settingsPanel`/`settingsCloseBtn` declarations shown here are the corrected version — these four were previously missing, which caused a `ReferenceError` on load; see the fix applied earlier in this conversation.)*
+`BACKEND_BASE` is declared here (not in `popup.js`) since `auth.js` loads first and both files need it.
+
+The session object saved to `chrome.storage.local` under the key `meetingSummarizerSession` is exactly:
+```javascript
+{ user_id, username }
+```
+**No password is ever stored locally.** Logging in again just re-checks username+password against the backend and re-saves this object.
+
+### Auth mode toggle (Login ⇄ Register)
+```javascript
+let authMode = "login"; // "login" | "register"
+
+authToggleBtn.addEventListener("click", () => {
+  authMode = authMode === "login" ? "register" : "login";
+  clearAuthError();
+  if (authMode === "register") {
+    authSubmitBtn.textContent = "Create account";
+    authToggleText.textContent = "Already have an account?";
+    authToggleBtn.textContent = "Log in";
+    authPasswordInput.setAttribute("autocomplete", "new-password");
+  } else {
+    authSubmitBtn.textContent = "Log in";
+    authToggleText.textContent = "Don't have an account?";
+    authToggleBtn.textContent = "Register";
+    authPasswordInput.setAttribute("autocomplete", "current-password");
+  }
+});
+```
+Flips between the two modes, relabeling the submit button and the toggle link, and swaps the password field's `autocomplete` hint (`new-password` vs `current-password`) so the browser's own password manager offers the right behavior (suggest-a-strong-password vs. autofill-a-saved-one).
+
+### Submitting the auth form
+```javascript
+authSubmitBtn.addEventListener("click", async () => {
+  const username = authUsernameInput.value.trim();
+  const password = authPasswordInput.value;
+  ...
+  const endpoint = authMode === "register" ? "/auth/register" : "/auth/login";
+
+  try {
+    const res = await fetch(`${BACKEND_BASE}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Server returned ${res.status}`);
+
+    await saveSession({ user_id: data.user_id, username: data.username });
+    authPasswordInput.value = "";
+    await enterAppScreen();
+  } catch (err) {
+    showAuthError(
+      err.message.includes("fetch")
+        ? "Can't reach the backend. Make sure it's running (python main.py)."
+        : err.message
+    );
+  } finally {
+    authSubmitBtn.disabled = false;
+    authSubmitBtn.textContent = authMode === "register" ? "Create account" : "Log in";
+  }
+});
+```
+- Client-side validation only checks both fields are non-empty; length/format rules (username ≥ 3 chars, password ≥ 8 chars) are enforced server-side and surfaced via the error message if violated.
+- Posts to `/auth/register` or `/auth/login` depending on the current mode.
+- On success: saves the returned `{ user_id, username }` as the session, clears the password field from memory, and transitions into the app screen.
+- On failure: a fetch-level failure (backend not running) gets a specific, actionable message; any other error (bad credentials, username taken, validation failure) shows the backend's own `detail` message directly.
+- Button is disabled and relabeled ("Logging in..."/"Creating account...") for the duration of the request, always restored in `finally` regardless of outcome.
+
+### Logout
+```javascript
+logoutBtn.addEventListener("click", async () => {
+  await clearSession();
+  location.reload();
+});
+```
+Clears the stored session and reloads the whole popup document — simplest way to guarantee every piece of in-memory state (`currentSession`, key statuses, mic list, etc.) resets cleanly back to the auth screen.
+
+### Session helpers
+```javascript
+async function saveSession(session) {
+  currentSession = session;
+  await chrome.storage.local.set({ meetingSummarizerSession: session });
+}
+async function loadSession() {
+  const stored = await chrome.storage.local.get(["meetingSummarizerSession"]);
+  currentSession = stored.meetingSummarizerSession || null;
+  return currentSession;
+}
+async function clearSession() {
+  currentSession = null;
+  await chrome.storage.local.remove(["meetingSummarizerSession"]);
+}
+function getCurrentUserId() {
+  return currentSession ? currentSession.user_id : null;
+}
+```
+`getCurrentUserId()` is the function `popup.js` and the recovery flow call whenever they need to attach `user_id` to an upload — it always reflects whatever `currentSession` currently holds, so it can't go stale independently of the session object.
+
+### `enterAppScreen()`
+```javascript
+async function enterAppScreen() {
+  authScreen.style.display = "none";
+  appScreen.style.display = "block";
+  accountUsernameEl.textContent = currentSession.username;
+  await refreshKeyStatuses();
+  if (typeof onAppScreenReady === "function") {
+    onAppScreenReady();
+  }
+}
+```
+Swaps screens, shows the username in the settings panel, refreshes Groq/HubSpot key status from the backend, and — only once all of that's done — hands off to `popup.js`'s `onAppScreenReady()` (mic list population, recovery check, Start-button gating). The `typeof onAppScreenReady === "function"` guard is defensive: it lets `auth.js` be loaded/tested independent of `popup.js` without throwing if that function isn't defined yet.
+
+### Settings panel: key status + edit forms
+```javascript
+let hasGroqKey = false;
+let hasHubspotKey = false;
+
+function renderKeyStatus(el, isSet, label) {
+  el.textContent = isSet ? `${label} saved` : "Not set";
+  el.className = "keyStatus " + (isSet ? "set" : "notSet");
+}
+
+async function refreshKeyStatuses() {
+  if (!currentSession) return;
+  try {
+    const res = await fetch(`${BACKEND_BASE}/user/keys?user_id=${encodeURIComponent(currentSession.user_id)}`);
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    const data = await res.json();
+    hasGroqKey = Boolean(data.has_groq_key);
+    hasHubspotKey = Boolean(data.has_hubspot_key);
+  } catch (err) {
+    hasGroqKey = false;
+    hasHubspotKey = false;
+  }
+  renderKeyStatus(groqKeyStatusEl, hasGroqKey, "Key");
+  renderKeyStatus(hubspotKeyStatusEl, hasHubspotKey, "Key");
+  if (typeof updateStartAvailability === "function") updateStartAvailability();
+}
+```
+- `hasGroqKey`/`hasHubspotKey` are module-level booleans that `popup.js` reads directly (e.g. to gate the Start button) — this is the extension-side mirror of what the backend's `GET /user/keys` reports.
+- A failed status check (backend down, network error) fails safe: both flags reset to `false`, which correctly disables recording rather than assuming a key is present.
+- After updating the display, also pokes `popup.js`'s `updateStartAvailability()` if it exists, so the Start button reacts immediately to a status change (e.g. right after a key is saved).
+
+**Values are never fetched back down once saved — only whether one is set.** Editing always means typing a brand new value and saving it, the same pattern as changing a password.
+
+```javascript
+function wireKeyEditor({ toggleBtn, form, input, saveBtn, cancelBtn, field }) {
+  toggleBtn.addEventListener("click", () => {
+    form.classList.toggle("open");
+    if (form.classList.contains("open")) input.focus();
+  });
+  cancelBtn.addEventListener("click", () => {
+    input.value = "";
+    form.classList.remove("open");
+  });
+  saveBtn.addEventListener("click", async () => {
+    const value = input.value.trim();
+    if (!value) return;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving...";
+    try {
+      const body = { user_id: currentSession.user_id };
+      body[field] = value;
+      const res = await fetch(`${BACKEND_BASE}/user/keys`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server returned ${res.status}`);
+      }
+      input.value = "";
+      form.classList.remove("open");
+      await refreshKeyStatuses();
+    } catch (err) {
+      alert("Couldn't save key: " + err.message);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
+    }
+  });
+}
+
+wireKeyEditor({ toggleBtn: groqKeyEditToggle, form: groqKeyEditForm, input: groqKeyInput,
+                 saveBtn: groqKeySaveBtn, cancelBtn: groqKeyCancelBtn, field: "groq_api_key" });
+wireKeyEditor({ toggleBtn: hubspotKeyEditToggle, form: hubspotKeyEditForm, input: hubspotKeyInput,
+                 saveBtn: hubspotKeySaveBtn, cancelBtn: hubspotKeyCancelBtn, field: "hubspot_api_key" });
+```
+A single reusable function wires up both the Groq and HubSpot key rows identically (avoiding duplicated logic for two nearly-identical UI patterns):
+- **Toggle** opens/closes the collapsible edit form and focuses the input when opening.
+- **Cancel** clears whatever was typed and closes the form without saving.
+- **Save**: skips silently on an empty/whitespace-only value (nothing to save); otherwise PUTs `{ user_id, [field]: value }` to `/user/keys`, clears and closes the form, and re-fetches key statuses so the row immediately reflects "saved." A failure surfaces via a plain `alert()` with the backend's error detail — deliberately simple since this is a low-frequency settings action, not part of the main recording flow.
+
+### Boot sequence
+```javascript
+document.addEventListener("DOMContentLoaded", async () => {
+  const session = await loadSession();
+  if (session && session.user_id) {
+    await enterAppScreen();
+  } else {
+    authScreen.style.display = "block";
+  }
+});
+```
+Deferred to `DOMContentLoaded` (rather than run immediately at script-parse time) specifically so `popup.js` — loaded *after* this file — has already defined `onAppScreenReady()` by the time `enterAppScreen()` might try to call it for an already-logged-in user. Checks for a saved session; if one exists, skips straight past the auth screen into the app.
+
+---
+
+## 5. `popup.js` — Recording and Upload Logic
+
+`BACKEND_URL` is derived from `auth.js`'s `BACKEND_BASE` (already declared by the time this file runs, since `auth.js` loads first):
+```javascript
+const BACKEND_URL = `${BACKEND_BASE}/process-meeting`;
+```
 
 ### Settings panel open/close
 ```javascript
@@ -199,6 +398,7 @@ settingsBtn.addEventListener("click", () => settingsOverlay.classList.add("open"
 settingsCloseBtn.addEventListener("click", () => settingsOverlay.classList.remove("open"));
 openSettingsForKeyBtn.addEventListener("click", () => {
   settingsOverlay.classList.add("open");
+  if (!groqKeyEditForm.classList.contains("open")) groqKeyEditToggle.click();
   groqKeyInput.focus();
 });
 settingsOverlay.addEventListener("click", (e) => {
@@ -206,44 +406,21 @@ settingsOverlay.addEventListener("click", (e) => {
 });
 ```
 - Gear icon and close (`×`) button toggle the `.open` class (which controls visibility via CSS).
-- The "Open Settings" link inside the missing-key banner both opens the panel AND focuses the key input directly, so the user can start typing immediately.
+- The "Open Settings" shortcut inside the missing-key banner opens the panel **and** jumps straight into the Groq key's edit form (`groqKeyEditToggle.click()`, only if not already open) before focusing the input — so the user lands directly on the thing they need to fix, not just the panel in general.
 - Clicking the dimmed backdrop closes the panel too — but only when the click target is the backdrop itself (`e.target === settingsOverlay`), not a click that merely bubbles up from something inside the panel.
 
-### Groq key: load, debounced save, and Start-button gating
+### `updateStartAvailability()`
 ```javascript
 function updateStartAvailability() {
-  const hasKey = groqKeyInput.value.trim().length > 0;
-  groqKeyMissingBanner.style.display = hasKey ? "none" : "block";
+  groqKeyMissingBanner.style.display = hasGroqKey ? "none" : "block";
   if (stopBtn.disabled) {
-    startBtn.disabled = !hasKey;
+    startBtn.disabled = !hasGroqKey;
   }
 }
 ```
-- Central function keeping the Start button's enabled state and the missing-key banner in sync with whether a key is currently typed in.
-- `if (stopBtn.disabled)` guard: `stopBtn` is only enabled while actively recording. This check prevents `updateStartAvailability()` from fighting an in-progress recording/processing state — it only ever toggles `startBtn` when we're NOT mid-recording.
+Reads `hasGroqKey` directly from `auth.js` (a shared top-level variable, not passed as an argument) — this runs whenever key status is refreshed (from `auth.js`'s `refreshKeyStatuses()`) and keeps the Start button's enabled state in sync. The `if (stopBtn.disabled)` guard means this never fights an in-progress recording/processing state — it only ever toggles `startBtn` when we're NOT mid-recording (`stopBtn` is only enabled while actively recording).
 
-```javascript
-let groqKeySaveTimeout = null;
-chrome.storage.local.get(["userGroqApiKey"], (result) => {
-  groqKeyInput.value = result.userGroqApiKey || "";
-  updateStartAvailability();
-});
-groqKeyInput.addEventListener("input", () => {
-  updateStartAvailability();
-  clearTimeout(groqKeySaveTimeout);
-  groqKeySavedNote.style.display = "none";
-  groqKeySaveTimeout = setTimeout(() => {
-    const value = groqKeyInput.value.trim();
-    chrome.storage.local.set({ userGroqApiKey: value }, () => {
-      groqKeySavedNote.style.display = "block";
-    });
-  }, 500);
-});
-```
-- On load, restores any previously saved key from `chrome.storage.local` into the input field, then immediately runs `updateStartAvailability()`.
-- On every keystroke: re-checks availability instantly (so the Start button reacts immediately), hides the "Saved." note (since the value is now different from what's stored), and **debounces the actual storage write by 500ms** — `clearTimeout` cancels any pending save from the previous keystroke, so rapid typing only results in one storage write 500ms after the user pauses, not one write per character.
-
-### Save-locally checkbox persistence
+### Save-locally / save-audio checkbox persistence
 ```javascript
 chrome.storage.local.get(["saveLocallyPref"], (result) => {
   saveLocallyCheckbox.checked = Boolean(result.saveLocallyPref);
@@ -251,8 +428,15 @@ chrome.storage.local.get(["saveLocallyPref"], (result) => {
 saveLocallyCheckbox.addEventListener("change", () => {
   chrome.storage.local.set({ saveLocallyPref: saveLocallyCheckbox.checked });
 });
+
+chrome.storage.local.get(["saveAudioPref"], (result) => {
+  saveAudioCheckbox.checked = Boolean(result.saveAudioPref);
+});
+saveAudioCheckbox.addEventListener("change", () => {
+  chrome.storage.local.set({ saveAudioPref: saveAudioCheckbox.checked });
+});
 ```
-Same pattern as the mic selection (below) and the Groq key — restore on load, persist on change — so the user's preference carries across popup-window opens without re-checking it every meeting.
+Two independent preferences, same restore-on-load/persist-on-change pattern as the mic selection below, so neither has to be re-checked every meeting. They're intentionally separate (not one combined toggle) since raw audio files can be large and default to **off**, while the PDF summary is comparatively lightweight.
 
 ### `checkForRecoverableSession()`
 ```javascript
@@ -262,12 +446,10 @@ async function checkForRecoverableSession() {
   if (session && session.phase && session.phase !== "done" && session.sessionId !== currentSessionId) {
     recoveryBanner.style.display = "block";
     recoverBtn.onclick = async () => {
-      const groqKey = groqKeyInput.value.trim();
-      if (!groqKey) {
+      if (!hasGroqKey) {
         setStatus("Enter your Groq API key in Settings before recovering.");
         groqKeyMissingBanner.style.display = "block";
         settingsOverlay.classList.add("open");
-        groqKeyInput.focus();
         return;
       }
       recoverBtn.disabled = true;
@@ -283,9 +465,14 @@ async function checkForRecoverableSession() {
       }
 
       const blob = new Blob(chunks, { type: "audio/webm" });
+      if (saveAudioCheckbox.checked) {
+        try { await saveAudioLocally(blob); } catch (e) { console.warn(...); }
+      }
+
       const result = await uploadRecording(blob, {
-        backendUrl: BACKEND_URL, userId: currentUserId,
-        saveLocally: saveLocallyCheckbox.checked, groqApiKey: groqKeyInput.value.trim(),
+        backendUrl: BACKEND_URL,
+        userId: getCurrentUserId(),
+        saveLocally: saveLocallyCheckbox.checked,
         onStatus: setStatus,
       });
 
@@ -305,72 +492,7 @@ async function checkForRecoverableSession() {
   }
 }
 ```
-**A second, manual safety net** on top of `background.js`'s automatic recovery window — covers the case where the auto-recovery window itself somehow didn't open, or the user just reopened the extension normally and there's leftover unfinished work.
-- Only shows the banner if there's a genuinely unfinished session (`phase !== "done"`) that ISN'T the session currently in progress in *this* window (`session.sessionId !== currentSessionId` — avoids showing a "recover" banner for the very recording that's actively happening right now).
-- The click handler re-validates the Groq key is present (same gate as starting a fresh recording), loads whatever chunks were saved to IndexedDB, and if none exist, just clears the stale session record.
-- Otherwise reassembles the chunks into a `Blob` and runs it through the exact same `uploadRecording()` helper used by the normal flow (Section 5) — **no separate/duplicate upload logic**, so recovery and normal completion can't drift apart in behavior.
-- On success: deletes the IndexedDB backup (no longer needed), clears the session record, hides the banner, and shows the recovered summary inline.
-- On failure: re-enables the button so the user can retry, and explicitly reassures that the audio is still safely saved.
-
-### User identity
-```javascript
-let currentUserId = null;
-async function getOrCreateUserId() {
-  const stored = await chrome.storage.local.get(["meetingSummarizerUserId"]);
-  if (stored.meetingSummarizerUserId) {
-    return stored.meetingSummarizerUserId;
-  }
-  const newId = crypto.randomUUID();
-  await chrome.storage.local.set({ meetingSummarizerUserId: newId });
-  return newId;
-}
-```
-Generates a UUID **once per browser profile** and reuses it forever after — this is the extension's own permanent identity for the person using it, distinct from any HubSpot login. It's what lets the backend recognize "this recording belongs to the same person who connected HubSpot earlier" across every session (this is the `user_id` sent with every backend request, matching `main.py`'s per-user token lookup).
-
-### HubSpot connection status
-```javascript
-async function refreshHubspotConnectionStatus() {
-  try {
-    const res = await fetch(`${BACKEND_BASE}/oauth/status?user_id=${encodeURIComponent(currentUserId)}`);
-    const data = await res.json();
-    if (data.connected) {
-      crmStatusTextEl.textContent = "HubSpot connected ✅";
-      crmStatusTextEl.className = "connected";
-      connectHubspotBtn.classList.add("hidden");
-    } else {
-      crmStatusTextEl.textContent = "HubSpot not connected";
-      crmStatusTextEl.className = "notConnected";
-      connectHubspotBtn.classList.remove("hidden");
-    }
-  } catch (err) {
-    crmStatusTextEl.textContent = "Can't reach backend to check HubSpot status";
-    crmStatusTextEl.className = "notConnected";
-    connectHubspotBtn.classList.remove("hidden");
-  }
-}
-```
-Calls the backend's `/oauth/status` endpoint and reflects the result in the settings panel's status line, toggling visibility of the "Connect HubSpot" button accordingly. If the fetch itself fails (backend not running, unreachable), it degrades gracefully — shows a distinct "Can't reach backend" message rather than a misleading "not connected," and doesn't block anything else (recording still works either way).
-
-```javascript
-connectHubspotBtn.addEventListener("click", () => {
-  chrome.tabs.create({
-    url: `${BACKEND_BASE}/oauth/connect?user_id=${encodeURIComponent(currentUserId)}`,
-  });
-});
-window.addEventListener("focus", refreshHubspotConnectionStatus);
-```
-- Clicking "Connect HubSpot" opens the backend's `/oauth/connect` URL (tagged with this user's ID) in a **new browser tab** — that's where the real HubSpot login/consent screen runs (see `main.py` Section 6).
-- Re-checks connection status whenever this window **regains focus** — so after the user finishes the HubSpot login flow in the other tab and clicks back, the "Connect HubSpot" button disappears automatically without a manual refresh.
-
-### Startup sequence
-```javascript
-(async () => {
-  currentUserId = await getOrCreateUserId();
-  await refreshHubspotConnectionStatus();
-  await checkForRecoverableSession();
-})();
-```
-An immediately-invoked async function that runs the three initialization steps in order the moment the script loads: establish identity → check CRM connection → check for anything left unfinished from before.
+This is a **second, manual** safety net on top of `background.js`'s automatic recovery-window trigger (Section 2) — it covers the case where a previous session never made it to `"done"` but the automatic `recovery.html` window somehow also didn't manage to open. Notably it calls `getCurrentUserId()` (from `auth.js`) rather than handling any key material itself — the upload only needs to know *who* is logged in; the backend resolves the actual Groq/HubSpot keys server-side.
 
 ### Recording state variables
 ```javascript
@@ -384,11 +506,11 @@ let recordingStartTime = null;
 let currentSessionId = null;
 let pendingFlushChunks = [];
 let flushIndex = 0;
-const FLUSH_EVERY_N_CHUNKS = 10; // ~10s of audio per IndexedDB write
+const FLUSH_EVERY_N_CHUNKS = 10; // ~10s of audio per IndexedDB write, given the 1s MediaRecorder timeslice
 ```
 - `currentSessionId` identifies one recording end-to-end (start click → fully processed) — used as the IndexedDB key so audio can be found again by this same window normally, or by a recovery window if this one closes unexpectedly.
 - `pendingFlushChunks` / `flushIndex` track chunks not yet written to IndexedDB and the running batch-order index within the session.
-- `FLUSH_EVERY_N_CHUNKS = 10`, combined with the 1-second `MediaRecorder` timeslice (see below), means roughly every 10 seconds of audio gets written to IndexedDB as one batch.
+- `FLUSH_EVERY_N_CHUNKS = 10`, combined with the 1-second `MediaRecorder` timeslice, means roughly every 10 seconds of audio gets written to IndexedDB as one batch.
 
 ### `populateMicList()`
 ```javascript
@@ -399,19 +521,7 @@ async function populateMicList() {
 
     const devices = await navigator.mediaDevices.enumerateDevices();
     const mics = devices.filter((d) => d.kind === "audioinput");
-
-    micSelectEl.innerHTML = "";
-    if (mics.length === 0) {
-      micSelectEl.innerHTML = '<option value="">No microphone found</option>';
-      return;
-    }
-    mics.forEach((mic, i) => {
-      const opt = document.createElement("option");
-      opt.value = mic.deviceId;
-      opt.textContent = mic.label || `Microphone ${i + 1}`;
-      micSelectEl.appendChild(opt);
-    });
-
+    ...
     chrome.storage.local.get(["preferredMicId"], (result) => {
       const savedId = result.preferredMicId;
       if (savedId && mics.some((m) => m.deviceId === savedId)) {
@@ -426,53 +536,34 @@ async function populateMicList() {
 micSelectEl.addEventListener("change", () => {
   chrome.storage.local.set({ preferredMicId: micSelectEl.value });
 });
-populateMicList();
 ```
-**Why it requests a throwaway mic stream first:** Chrome hides real device labels (`mic.label`) from `enumerateDevices()` until microphone *permission* has actually been granted — without it, you'd just see generic unlabeled entries. So this grabs a temporary stream purely to trigger the permission prompt/unlock labels, immediately stops its tracks (`tempStream.getTracks().forEach(track => track.stop())` — releasing the mic right away since this stream isn't the one that will actually be recorded), then lists the real devices.
-- Filters to `audioinput` devices only.
-- Populates the `<select>` with real device labels (falling back to a generic "Microphone N" if a label is somehow still blank).
-- Restores the last-used mic selection from storage if that device is still present in the current list; otherwise leaves the browser's default selection.
+**Why it requests a throwaway mic stream first:** Chrome hides real device labels (`mic.label`) from `enumerateDevices()` until microphone *permission* has actually been granted — without it, you'd just see generic unlabeled entries. So this grabs a temporary stream purely to trigger the permission prompt/unlock labels, immediately stops its tracks (releasing the mic right away since this stream isn't the one that will actually be recorded), then lists the real devices.
+- Filters to `audioinput` devices only; falls back to a generic "Microphone N" label if one is somehow still blank.
+- Restores the last-used mic selection from storage if that device is still present in the current list.
 - Saves the choice to `chrome.storage.local` on every change so it persists across sessions.
-- **Why this matters at all:** the code comment explains that `getUserMedia({audio:true})` alone just grabs whatever the OS treats as default — which is often NOT the mic the user actually selected inside Google Meet/Zoom's own device settings (e.g. a headset vs. the laptop's built-in mic). Explicitly listing and selecting avoids that mismatch.
+- **Why this matters at all:** `getUserMedia({audio:true})` alone just grabs whatever the OS treats as default — which is often NOT the mic the user actually selected inside Google Meet/Zoom's own device settings (e.g. a headset vs. the laptop's built-in mic). Explicitly listing and selecting avoids that mismatch.
+- Called from `onAppScreenReady()` (see end of this section), not at script-load time — it needs a logged-in session to make sense of the rest of the screen state around it.
 
 ### Small utility functions
 ```javascript
 function setStatus(text) { statusEl.textContent = text; }
-
-function formatElapsed(ms) {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
-  const seconds = String(totalSeconds % 60).padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
-
-function startTimer() {
-  recordingStartTime = Date.now();
-  timerInterval = setInterval(() => {
-    timerEl.textContent = formatElapsed(Date.now() - recordingStartTime);
-  }, 500);
-}
-function stopTimer() {
-  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-}
+function formatElapsed(ms) { ... }  // ms -> zero-padded "MM:SS"
+function startTimer() { ... }       // updates #timer every 500ms
+function stopTimer() { ... }
 
 function notifySessionState(phase) {
   chrome.runtime.sendMessage({ type: "SESSION_STATE", sessionId: currentSessionId, phase });
 }
 ```
-- `formatElapsed`: converts milliseconds into a zero-padded `MM:SS` string.
-- `startTimer`/`stopTimer`: drive the on-screen timer, updating every 500ms (twice per second, smoother than once per second while still cheap).
-- `notifySessionState(phase)`: the sending half of the `SESSION_STATE` messaging protocol handled in `background.js` — every phase transition (`"recording"`, `"processing"`, `"done"`) gets broadcast so the badge and crash-recovery tracking stay accurate.
+`notifySessionState(phase)` is the sending half of the `SESSION_STATE` messaging protocol handled in `background.js` (Section 2) — every phase transition (`"recording"`, `"processing"`, `"done"`) gets broadcast so the badge and crash-recovery tracking stay accurate.
 
 ### Starting a recording — `startBtn` click handler
 ```javascript
 startBtn.addEventListener("click", () => {
-  const groqKey = groqKeyInput.value.trim();
-  if (!groqKey) {
+  if (!hasGroqKey) {
     setStatus("Enter your Groq API key in Settings before recording.");
     groqKeyMissingBanner.style.display = "block";
     settingsOverlay.classList.add("open");
-    groqKeyInput.focus();
     return;
   }
 
@@ -488,32 +579,15 @@ startBtn.addEventListener("click", () => {
     startBtn.disabled = false;
     return;
   }
-  ...
-```
-- First gate: no Groq key → block recording entirely, show the missing-key banner, open settings, and focus the field — recording literally cannot start without a key (matches the backend's hard `400` rejection for a missing key, so the failure is caught here instead of after a wasted recording).
-- Reads `tabId` back out of the URL query string that `background.js` set when it opened this window (`popup.html?tabId=...`) — this is how the popup knows which tab to target, since it can't just assume "the currently focused tab."
-- If `tabId` is somehow missing/invalid, fails clearly with instructions to close and retry from the meeting tab.
 
-```javascript
   chrome.tabCapture.getMediaStreamId({ targetTabId }, (streamId) => {
-    if (chrome.runtime.lastError || !streamId) {
-      setStatus("Could not capture tab audio: " + (chrome.runtime.lastError ? chrome.runtime.lastError.message : "unknown error") + ". Make sure that tab is still open.");
-      startBtn.disabled = false;
-      return;
-    }
-
+    ...
     navigator.mediaDevices.getUserMedia({
       audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId } },
     }).then((tabStream) => {
       capturedStream = tabStream;
       setStatus("Requesting microphone access...");
-      ...
-```
-- `chrome.tabCapture.getMediaStreamId({ targetTabId }, ...)` — **targets a specific tab by ID**, unlike the older `tabCapture.capture()` API which only works on whichever tab is currently focused (not useful once recording happens in a separate window, since the meeting tab won't be "focused" anymore).
-- Uses the returned `streamId` inside a special `getUserMedia` call with `chromeMediaSource: "tab"` — this is the standard MV3 pattern for turning a tab-capture stream ID into an actual `MediaStream`.
-- Any failure here (permission denied, tab closed) surfaces a clear status message and re-enables the Start button.
 
-```javascript
       const selectedMicId = micSelectEl.value;
       const micConstraints = selectedMicId ? { audio: { deviceId: { exact: selectedMicId } } } : { audio: true };
 
@@ -522,7 +596,6 @@ startBtn.addEventListener("click", () => {
         audioContext = new AudioContext();
 
         const ensureRunning = audioContext.state === "running" ? Promise.resolve() : audioContext.resume();
-
         return ensureRunning.then(() => {
           const mixedDestination = audioContext.createMediaStreamDestination();
 
@@ -532,91 +605,70 @@ startBtn.addEventListener("click", () => {
 
           const micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(mixedDestination);
-          ...
-```
-- Requests the user's own mic, using the specific device chosen in the dropdown if one was selected (`deviceId: { exact: ... } }`), otherwise the OS default.
-- **`AudioContext` suspended-state check is important and deliberate:** a fresh `AudioContext` can start in a `"suspended"` state — especially likely here since this code runs several `.then()` hops away from the original click, so the browser may not treat it as directly tied to the user gesture anymore. A suspended context processes **no audio at all** — `MediaRecorder` would still produce a normal-looking file, just filled with silence, which would be a very confusing silent failure. `ensureRunning` forces `audioContext.resume()` if needed before wiring anything up.
-- **Audio mixing via Web Audio API:**
-  - `mixedDestination` — a virtual destination node that becomes the actual `MediaStream` fed to `MediaRecorder`.
-  - Tab audio is connected to BOTH `mixedDestination` (so it's recorded) AND `audioContext.destination` (so it's also still routed to the speakers — otherwise the user would record fine but hear silence during their own meeting).
-  - Mic audio is connected ONLY to `mixedDestination` (recorded) and deliberately NOT to `audioContext.destination` — routing it back to speakers too would create an audible echo of the user's own voice.
 
-```javascript
           recordedChunks = [];
           currentSessionId = crypto.randomUUID();
           pendingFlushChunks = [];
           flushIndex = 0;
 
           mediaRecorder = new MediaRecorder(mixedDestination.stream, { mimeType: "audio/webm;codecs=opus" });
-
-          mediaRecorder.ondataavailable = (event) => {
-            if (event.data && event.data.size > 0) {
-              recordedChunks.push(event.data);
-              pendingFlushChunks.push(event.data);
-
-              if (pendingFlushChunks.length >= FLUSH_EVERY_N_CHUNKS) {
-                const toFlush = pendingFlushChunks;
-                pendingFlushChunks = [];
-                const batchBlob = new Blob(toFlush, { type: "audio/webm" });
-                const thisFlushIndex = flushIndex++;
-                saveChunkToDB(currentSessionId, thisFlushIndex, batchBlob).catch((e) => {
-                  console.warn("Failed to persist audio chunk to IndexedDB:", e);
-                });
-              }
-            }
-          };
-```
-- A brand-new `currentSessionId` (UUID) is generated for every recording — this is the key used for both the in-memory chunk array and the IndexedDB backup.
-- `MediaRecorder` is created against the **mixed** stream (tab + mic combined), using the `opus` codec inside a `webm` container.
-- `ondataavailable` fires periodically (driven by the `mediaRecorder.start(1000)` timeslice below, i.e. roughly once per second) with a small chunk of audio data:
-  - Every chunk is kept in the full in-memory `recordedChunks` array (used to build the final upload blob when recording stops normally).
-  - Every chunk is ALSO added to `pendingFlushChunks`, a separate buffer that gets periodically written to IndexedDB.
-  - Once `pendingFlushChunks` reaches `FLUSH_EVERY_N_CHUNKS` (10, i.e. roughly every 10 seconds of audio given the 1-second timeslice), those chunks are batched into one `Blob` and saved to IndexedDB via `saveChunkToDB()` (defined in `session-utils.js`) under an incrementing `flushIndex`. Batching into groups of 10 (rather than writing every single 1-second chunk individually) keeps the number of IndexedDB writes reasonable across a multi-hour recording.
-  - Any IndexedDB write failure is caught and logged (`console.warn`) but doesn't interrupt the recording itself — the in-memory copy is still intact for the normal (non-crash) path.
-
-```javascript
-          mediaRecorder.onstop = async () => {
-            if (pendingFlushChunks.length > 0) {
-              const batchBlob = new Blob(pendingFlushChunks, { type: "audio/webm" });
-              pendingFlushChunks = [];
-              const thisFlushIndex = flushIndex++;
-              try {
-                await saveChunkToDB(currentSessionId, thisFlushIndex, batchBlob);
-              } catch (e) {
-                console.warn("Failed to persist final audio chunk to IndexedDB:", e);
-              }
-            }
-            handleRecordingStop();
-          };
-
-          mediaRecorder.onerror = (event) => {
-            setStatus("Recording error: " + event.error.message);
-          };
+          mediaRecorder.ondataavailable = (event) => { ... };
+          mediaRecorder.onstop = async () => { ... };
+          mediaRecorder.onerror = (event) => { setStatus("Recording error: " + event.error.message); };
 
           mediaRecorder.start(1000);
           startTimer();
           notifySessionState("recording");
-
           setStatus("Recording meeting audio (tab + mic)...");
           stopBtn.disabled = false;
         });
       });
-    })
-    .catch((err) => {
-      setStatus("Could not access microphone: " + err.message + ". Recording will only include tab audio, or you can allow mic access and try again.");
-      if (capturedStream) { capturedStream.getTracks().forEach((track) => track.stop()); }
-      startBtn.disabled = false;
-    });
+    }).catch((err) => { ... });
   });
 });
 ```
-- `onstop`: before moving on, flushes whatever's left in `pendingFlushChunks` (less than a full batch of 10) so the IndexedDB backup is complete right up to the moment "Stop" was clicked — then calls `handleRecordingStop()` to kick off the upload pipeline.
-- `onerror`: surfaces any `MediaRecorder`-level error directly in the status line.
-- `mediaRecorder.start(1000)` — starts recording with a **1-second timeslice**, meaning `ondataavailable` fires roughly every second rather than only once at the very end. This is essential for both the periodic IndexedDB flushing above and for keeping memory usage sane during long recordings.
-- Notifies `background.js` of the `"recording"` phase (turns on the "REC" badge, per Section 2) and updates the UI (enables Stop, disables further Start clicks implicitly via the earlier `startBtn.disabled = true`).
-- The outer `.catch()` handles a **mic access denial** specifically — note this is scoped so that if the mic fails but tab capture already succeeded, the message explicitly tells the user recording will continue with tab-only audio... though as written, this catch actually aborts entirely (`startBtn.disabled = false` re-enables Start) rather than proceeding tab-only; the message describes the intent but the current code path stops rather than degrading gracefully. If the mic step fails, `capturedStream`'s tracks are stopped to release the tab-capture resource cleanly.
+Step by step:
+1. **First gate: no Groq key** (`hasGroqKey`, from `auth.js`) → block recording entirely, show the missing-key banner, and open settings. This mirrors the backend's hard `400` rejection for a missing key, so the failure is caught here instead of after an entire meeting is recorded for nothing.
+2. Reads `tabId` back out of the URL query string that `background.js` set when it opened this window (`popup.html?tabId=...`). If missing/invalid, fails clearly with instructions to close and retry from the meeting tab.
+3. `chrome.tabCapture.getMediaStreamId({ targetTabId }, ...)` — targets a **specific** tab by ID (unlike the older `chrome.tabCapture.capture()`, which only works on whichever tab is currently focused, not useful now that recording happens in a separate window).
+4. That stream ID is then handed to `getUserMedia` with `chromeMediaSource: "tab"` to actually capture the tab's audio.
+5. Separately requests the user's own microphone, honoring whichever device is selected in the dropdown (`deviceId: { exact: selectedMicId }`) rather than letting the browser pick the OS default.
+6. Both streams are mixed via the Web Audio API: an `AudioContext` (explicitly `resume()`d if it started `"suspended"` — several `.then()` hops removed from the original click, the browser may not treat context creation as directly gesture-tied, and a suspended context silently records pure silence rather than erroring) feeds a `MediaStreamDestination`. Tab audio is connected to **both** the mixed destination and back out to the speakers (so the user keeps hearing the meeting normally); mic audio is connected **only** to the mixed destination (not looped back to speakers, to avoid the user hearing an echo of their own voice).
+7. A fresh `currentSessionId` (UUID) is generated and flush-tracking state reset, then `MediaRecorder` starts on the mixed stream with a 1-second timeslice (so `ondataavailable` fires roughly once per second, feeding both the in-memory buffer and the periodic IndexedDB flush).
+8. `notifySessionState("recording")` tells `background.js` to show the "REC" badge and start tracking this as an active session for crash-recovery purposes.
+9. Failure at any stage in this chain (tab capture, mic access) is caught and reported with a specific message, and any partially-acquired stream is stopped so nothing keeps the mic/tab busy uselessly.
 
-### Stopping a recording
+### Recording data handling (`ondataavailable` / `onstop`)
+```javascript
+mediaRecorder.ondataavailable = (event) => {
+  if (event.data && event.data.size > 0) {
+    recordedChunks.push(event.data);
+    pendingFlushChunks.push(event.data);
+    if (pendingFlushChunks.length >= FLUSH_EVERY_N_CHUNKS) {
+      const toFlush = pendingFlushChunks;
+      pendingFlushChunks = [];
+      const batchBlob = new Blob(toFlush, { type: "audio/webm" });
+      const thisFlushIndex = flushIndex++;
+      saveChunkToDB(currentSessionId, thisFlushIndex, batchBlob).catch((e) => { console.warn(...); });
+    }
+  }
+};
+
+mediaRecorder.onstop = async () => {
+  if (pendingFlushChunks.length > 0) {
+    const batchBlob = new Blob(pendingFlushChunks, { type: "audio/webm" });
+    pendingFlushChunks = [];
+    const thisFlushIndex = flushIndex++;
+    try { await saveChunkToDB(currentSessionId, thisFlushIndex, batchBlob); }
+    catch (e) { console.warn(...); }
+  }
+  handleRecordingStop();
+};
+```
+- Every ~10 seconds' worth of chunks gets batched into one `Blob` and written to IndexedDB as one row (keeping write volume reasonable across a multi-hour meeting, rather than one write per second).
+- On stop, whatever's left in the pending buffer (less than a full batch) is flushed **before** `handleRecordingStop()` runs, so the IndexedDB backup is complete right up to the moment the user clicked Stop.
+
+### Stopping a recording — `stopBtn` click handler
 ```javascript
 stopBtn.addEventListener("click", () => {
   stopBtn.disabled = true;
@@ -624,19 +676,15 @@ stopBtn.addEventListener("click", () => {
   stopTimer();
   notifySessionState("processing");
 
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
-  }
-  if (capturedStream) { capturedStream.getTracks().forEach((track) => track.stop()); }
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  if (capturedStream) capturedStream.getTracks().forEach((track) => track.stop());
   if (micStream) { micStream.getTracks().forEach((track) => track.stop()); micStream = null; }
   if (audioContext) { audioContext.close(); audioContext = null; }
 });
 ```
-- Immediately disables the Stop button (prevents double-clicks) and stops the visible timer.
-- **Notifies `"processing"` phase BEFORE the upload actually starts** — deliberate: the capture is done, but the upload/summarize/CRM-push pipeline hasn't happened yet, so the session must stay marked as in-flight (not `"done"`) so that a crash/close during the upload itself still triggers recovery.
-- Stops the `MediaRecorder` (triggering its `onstop` handler above), and releases all underlying media resources: tab capture tracks, mic tracks, and closes the `AudioContext` — proper cleanup so the tab's microphone/capture indicators turn off and resources aren't leaked.
+Notably calls `notifySessionState("processing")` **before** the actual `mediaRecorder.stop()` — capture is done, but the upload/summarize/CRM-push pipeline hasn't happened yet, so the session must stay marked as in-flight (not `"done"`) the whole time; if the window closes anywhere during that window, `background.js`'s crash recovery still needs to trigger. All three underlying resources (recorder, tab stream, mic stream, audio context) are torn down explicitly rather than left to garbage collection, since Chrome will otherwise keep the tab-capture and mic indicators active.
 
-### `handleRecordingStop()` — the actual upload
+### `handleRecordingStop()`
 ```javascript
 async function handleRecordingStop() {
   setStatus("Preparing audio for upload...");
@@ -652,9 +700,14 @@ async function handleRecordingStop() {
 
   resultEl.style.display = "none";
 
+  if (saveAudioCheckbox.checked) {
+    try { await saveAudioLocally(blob); } catch (e) { console.warn(...); }
+  }
+
   const result = await uploadRecording(blob, {
-    backendUrl: BACKEND_URL, userId: currentUserId,
-    saveLocally: saveLocallyCheckbox.checked, groqApiKey: groqKeyInput.value.trim(),
+    backendUrl: BACKEND_URL,
+    userId: getCurrentUserId(),
+    saveLocally: saveLocallyCheckbox.checked,
     onStatus: setStatus,
   });
 
@@ -672,41 +725,50 @@ async function handleRecordingStop() {
     }
     setStatus("Done. Summary generated and sent to CRM.");
     resultEl.style.display = "block";
-    resultEl.textContent = "Summary:\n" + data.summary + "\n\nCRM push status: " + (data.crm_push ? data.crm_push.status : "unknown") + pdfNote;
+    resultEl.textContent = "Summary:\n" + data.summary + "\n\nCRM push status: " +
+      (data.crm_push ? data.crm_push.status : "unknown") + pdfNote;
 
     await deleteSessionFromDB(currentSessionId).catch(() => {});
     notifySessionState("done");
   } else {
     setStatus("Failed to process meeting: " + result.error + ". The recorded audio is still saved and safe - reopen the extension to recover it.");
+    // Deliberately NOT marking "done" and NOT deleting the IndexedDB backup here.
   }
 
   startBtn.disabled = false;
   timerEl.textContent = "00:00";
 }
 ```
-- Assembles the complete recording into one `Blob` from the in-memory `recordedChunks` array (the fast/normal path — IndexedDB is only consulted during recovery, not on a normal successful finish).
-- Zero-size guard: if somehow nothing was captured, tells the user, marks the session `"done"` (nothing to recover), and stops here.
-- Delegates the actual upload to the shared `uploadRecording()` helper (Section 5) — passing the current user ID, the save-locally preference, and the Groq key.
-- On success: builds a friendly status message combining the summary text, CRM push status, and (if requested) a note about whether the local PDF save succeeded or failed — then cleans up the now-unneeded IndexedDB backup and marks the session `"done"`.
-- On failure: explicitly reassures the user the audio is still safe and can be recovered by reopening the extension — **and deliberately does NOT mark the session `"done"` or delete the IndexedDB backup here** — this is what allows `background.js`'s crash-recovery (if this window later closes) or the manual recovery banner (Section 4) to still retry the same upload later.
-- Either way, re-enables Start and resets the timer display back to `00:00`.
+- An empty recording (zero bytes — nothing was actually captured) is handled as a normal dead-end, not an error: status message, re-enable Start, mark the session `"done"` immediately since there's nothing to recover.
+- If **Save raw audio** is checked, that happens *before* the upload and independent of it — even if the upload fails or times out afterward, the original recording is already safe on disk.
+- The actual upload uses only `userId` (from `getCurrentUserId()`) — no key material is attached client-side; the backend resolves both keys from that account.
+- **On success:** builds a human-readable result string (summary text, CRM push status, and a note about where the PDF landed or why it failed), clears the IndexedDB backup (no longer needed since the upload succeeded), and marks the session `"done"`.
+- **On failure:** explicitly reassures the user the audio is still safe and tells them to reopen the extension to recover it — and, critically, does **not** mark the session done or delete the IndexedDB backup, so if this window is later closed, `background.js`'s crash recovery can still pick it up and retry.
+
+### `onAppScreenReady()`
+```javascript
+function onAppScreenReady() {
+  populateMicList();
+  checkForRecoverableSession();
+  updateStartAvailability();
+}
+```
+Called by `auth.js`'s `enterAppScreen()` once a session is confirmed (fresh login or restored from storage) — everything in `popup.js` that depends on knowing who's logged in waits for this single entry point rather than running at script-load time.
 
 ---
 
-## 5. `session-utils.js` — Shared IndexedDB + Upload Logic
+## 6. `session-utils.js` — Shared IndexedDB + Upload Helpers
 
-Loaded by both `popup.html` and `recovery.html` — this is the file that guarantees the normal recording flow and the crash-recovery flow behave **identically** when it comes to storing and uploading audio, so there's no risk of the two paths drifting apart in behavior.
+Loaded by both `popup.html` and `recovery.html`, and used by `auth.js`/`popup.js` on the one hand and `recovery.js` on the other — this is what keeps the "happy path" and "crash recovery path" from drifting apart.
 
-**Why IndexedDB at all:** for a 2-3 hour meeting, holding the entire recording only in a JS array in the popup window's memory is risky — if that window closes (crash, accidental click, laptop sleep interrupting it, etc.) before the upload finishes, the whole recording is gone. IndexedDB is per-extension-origin storage, readable from any extension page — including a recovery window opened later by `background.js` after an unexpected close.
+**Why IndexedDB at all:** for a 2-3 hour meeting, holding the entire recording only in a JS array in the popup window's memory is risky — if that window closes (crash, accidental click, laptop sleep interrupting it, etc.) before the upload finishes, the whole recording is gone. Audio is periodically flushed to IndexedDB *while recording is still happening*, not just at the end. IndexedDB is per-extension-origin storage, readable from any extension page — including a recovery window opened later by `background.js` after an unexpected close.
 
+### Database setup
 ```javascript
 const DB_NAME = "meetingSummarizerDB";
 const DB_VERSION = 1;
 const STORE_NAME = "audioChunks";
-```
 
-### `openChunkDB()`
-```javascript
 function openChunkDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -722,74 +784,42 @@ function openChunkDB() {
   });
 }
 ```
-Wraps the callback-based IndexedDB API in a Promise.
-- `onupgradeneeded` fires the first time the database is created (or the version number changes): creates the `audioChunks` object store with an auto-incrementing `id` primary key, plus a **non-unique** index on `sessionId` — this index is what lets `loadChunksFromDB` efficiently fetch all chunks belonging to one specific session without scanning the entire store.
+Standard IndexedDB open-with-upgrade pattern, wrapped in a Promise for `async`/`await` use everywhere else in the file. A `sessionId` index lets `loadChunksFromDB`/`deleteSessionFromDB` efficiently query all rows for one recording without a full table scan.
 
 ### `saveChunkToDB(sessionId, chunkIndex, blob)`
-```javascript
-async function saveChunkToDB(sessionId, chunkIndex, blob) {
-  const db = await openChunkDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    tx.objectStore(STORE_NAME).add({ sessionId, chunkIndex, blob, savedAt: Date.now() });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    db.close();
-  });
-}
-```
-Adds one batched blob record, tagged with its `sessionId` and `chunkIndex`. **`chunkIndex` must increase monotonically within a session** — this is what lets the chunks be reassembled in the correct chronological order later, since IndexedDB doesn't otherwise guarantee retrieval order matches insertion order across an index query.
+Adds one batched blob row (`{ sessionId, chunkIndex, blob, savedAt }`). Chunks are saved as small **batched** blobs (not one row per second) to keep IndexedDB write volume reasonable across a multi-hour recording; `chunkIndex` must increase monotonically within a session so rows can be reassembled in the right order later.
 
 ### `loadChunksFromDB(sessionId)`
-```javascript
-async function loadChunksFromDB(sessionId) {
-  const db = await openChunkDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readonly");
-    const index = tx.objectStore(STORE_NAME).index("sessionId");
-    const req = index.getAll(IDBKeyRange.only(sessionId));
-    req.onsuccess = () => {
-      const rows = req.result.sort((a, b) => a.chunkIndex - b.chunkIndex);
-      resolve(rows.map((r) => r.blob));
-    };
-    req.onerror = () => reject(req.error);
-    tx.oncomplete = () => db.close();
-  });
-}
-```
-Uses the `sessionId` index to fetch only the rows belonging to this session, then **explicitly sorts by `chunkIndex`** before returning just the blobs — this sort is what guarantees correct chronological reassembly regardless of the underlying storage/retrieval order.
+Queries all rows for a session via the `sessionId` index, sorts them by `chunkIndex` (IndexedDB doesn't guarantee retrieval order), and returns just the array of blobs in the correct sequence.
 
 ### `deleteSessionFromDB(sessionId)`
+Opens a cursor over all rows matching `sessionId` and deletes each one — called only after a confirmed-successful upload, so the backup persists through any failure that would otherwise lose the recording.
+
+### `saveAudioLocally(blob)`
 ```javascript
-async function deleteSessionFromDB(sessionId) {
-  const db = await openChunkDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const index = tx.objectStore(STORE_NAME).index("sessionId");
-    const req = index.openCursor(IDBKeyRange.only(sessionId));
-    req.onsuccess = (e) => {
-      const cursor = e.target.result;
-      if (cursor) { cursor.delete(); cursor.continue(); }
-    };
-    req.onerror = () => reject(req.error);
-    tx.oncomplete = () => { db.close(); resolve(); };
-  });
+async function saveAudioLocally(blob) {
+  if (!blob || blob.size === 0) return;
+  const url = URL.createObjectURL(blob);
+  const filename = `meeting-audio-${Date.now()}.webm`;
+  try {
+    await chrome.downloads.download({ url, filename, saveAs: false });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
 }
 ```
-Uses a cursor over the `sessionId` index to walk through and delete every row belonging to that session one at a time (`cursor.delete()` then `cursor.continue()` to advance to the next match), since IndexedDB doesn't offer a bulk "delete where" operation on an index range directly. Resolves once the whole transaction completes.
+Saves the raw recorded audio straight to Downloads, the same way the summary PDF is saved — deliberately independent of `uploadRecording()`/the backend, so the original recording is preserved locally even if the network is down or the backend fails entirely. Blob URLs only work inside an extension page (never the background service worker), which this always runs from. Revocation is deliberately delayed a full minute: `chrome.downloads.download()`'s returned promise resolves once the download **starts**, not once it finishes, and for a long meeting recording (tens/hundreds of MB) the actual file copy may still be in progress well after that — revoking the blob URL too early would abort an in-progress read.
 
-### `uploadRecording(blob, options)`
+### `uploadRecording(blob, { backendUrl, userId, saveLocally, onStatus })`
 ```javascript
-async function uploadRecording(blob, { backendUrl, userId, saveLocally, groqApiKey, onStatus }) {
-  if (!blob || blob.size === 0) {
-    return { success: false, error: "No audio data to process." };
-  }
+async function uploadRecording(blob, { backendUrl, userId, saveLocally, onStatus }) {
+  if (!blob || blob.size === 0) return { success: false, error: "No audio data to process." };
+  if (!userId) return { success: false, error: "Not logged in." };
 
   const formData = new FormData();
   formData.append("file", blob, `meeting-${Date.now()}.webm`);
   formData.append("user_id", userId);
   formData.append("save_locally", saveLocally ? "true" : "false");
-  formData.append("groq_api_key", groqApiKey || "");
 
   if (onStatus) onStatus("Uploading and processing (this can take a while for long meetings)...");
 
@@ -818,44 +848,37 @@ async function uploadRecording(blob, { backendUrl, userId, saveLocally, groqApiK
   }
 }
 ```
-**The single shared upload function used by every call site** — `popup.js`'s normal completion, `popup.js`'s manual recovery banner, and `recovery.js`'s automatic recovery flow all call this exact function, guaranteeing identical behavior across all three.
-- Guards against an empty blob up front.
-- Builds a `multipart/form-data` body matching exactly what the backend's `/process-meeting` endpoint expects: `file` (named with a timestamp), `user_id`, `save_locally` (as the string `"true"`/`"false"`, since form fields are text), and `groq_api_key`.
-- Fires a status callback before the request, since this can take a long time for a large meeting.
-- On a non-OK HTTP response, tries to parse the backend's JSON error body for its `detail` field (matching FastAPI's `HTTPException` shape) and throws that as the error message; falls back to a generic `"Server returned {status}"` if the body isn't parseable JSON.
-- On success, if the backend included base64 PDF data, immediately triggers a browser download via `chrome.downloads.download()` using a `data:` URL (no separate file-hosting needed — the PDF bytes are embedded directly in the URL). `saveAs: false` means it saves automatically without prompting the user for a location. If the download itself fails, the error is attached back onto `data.pdf.download_error` rather than failing the whole upload — the summary and CRM push already succeeded at that point, so only the local-save step should be reported as failed.
+The single upload-and-process step shared by a fresh recording (`popup.js`) and a recovered one (`recovery.js`), so both hit the backend the exact same way — including triggering the local PDF download if requested.
+- **No Groq/HubSpot key is sent from here** — `userId` identifies the logged-in account, and the backend looks both keys up from that account in Supabase server-side. The extension never holds either key value locally at any point.
+- Guards against both an empty blob and a missing `userId` before even attempting the request.
+- On a non-`data.pdf.data_base64` response (no PDF requested, or PDF generation failed server-side and only `data.pdf.error` came back), the download step is simply skipped.
+- If the PDF *was* generated but the local `chrome.downloads.download()` call itself fails, that failure is attached to `data.pdf.download_error` rather than failing the whole upload — the summary/transcript/CRM result are still returned successfully to the caller.
 - Returns a consistent `{ success: true, data }` or `{ success: false, error }` shape that every caller relies on.
 
 ---
 
-## 6. `recovery.html` — Recovery Window UI
+## 7. `recovery.html` — Recovery Window UI
 
-A minimal window opened either automatically by `background.js` (Section 2) or manually never — it's only ever auto-opened, there's no button elsewhere that opens it directly. Structure:
+A minimal window opened either automatically by `background.js` (Section 2) or manually via the popup's recovery banner (Section 5) — never opened any other way. Structure:
 - Title: "Recovering Interrupted Recording".
 - `#status`: main message area, updated throughout the recovery process.
-- **Retry** button (`#retryBtn`): hidden by default, shown only when recovery fails or needs a missing Groq key.
+- **Retry** button (`#retryBtn`): hidden by default, shown only when recovery fails or the user isn't logged in.
 - **Close** button (`#closeBtn`): always available.
 
-Same dark theme styling as `popup.html`. Loads `session-utils.js` then `recovery.js` (same ordering reason as `popup.html` — `recovery.js` calls functions defined in `session-utils.js`).
+Same dark theme styling as `popup.html`. Loads `session-utils.js` then `recovery.js` (same ordering reason as `popup.html` — `recovery.js` calls functions defined in `session-utils.js`). Notably, `recovery.js` does **not** load `auth.js` — it has no login UI of its own; it only reads whatever session already exists in `chrome.storage.local`.
 
 ---
 
-## 7. `recovery.js` — Automatic Recovery Flow
+## 8. `recovery.js` — Automatic Recovery Flow
 
 ```javascript
 const BACKEND_BASE = "http://127.0.0.1:8000";
 const BACKEND_URL = `${BACKEND_BASE}/process-meeting`;
 
-const statusEl = document.getElementById("status");
-const closeBtn = document.getElementById("closeBtn");
-const retryBtn = document.getElementById("retryBtn");
-
 const params = new URLSearchParams(window.location.search);
 const sessionId = params.get("sessionId");
-
-function setStatus(text) { statusEl.textContent = text; }
 ```
-Reads `sessionId` from the URL query string — this is exactly what `background.js` passed when it opened this window (`recovery.html?sessionId=...`).
+Reads `sessionId` from the URL query string — exactly what `background.js` passed when it opened this window (`recovery.html?sessionId=...`).
 
 ### `markSessionDone()`
 ```javascript
@@ -866,15 +889,12 @@ async function markSessionDone() {
   }
 }
 ```
-Clears the tracked `activeSession` in storage, but only if it still refers to *this* specific session (avoids accidentally clearing a different, newer session that might have started in the meantime).
+Clears the tracked `activeSession` in storage, but only if it still refers to *this specific* session — avoids accidentally clearing a different, newer session that might have started in the meantime.
 
 ### `runRecovery()`
 ```javascript
 async function runRecovery() {
-  if (!sessionId) {
-    setStatus("No interrupted recording found for this window.");
-    return;
-  }
+  if (!sessionId) { setStatus("No interrupted recording found for this window."); return; }
 
   retryBtn.classList.add("hidden");
   setStatus("Your previous recording session closed before it finished. Recovering the audio that was already saved...");
@@ -897,49 +917,39 @@ async function runRecovery() {
   const blob = new Blob(chunks, { type: "audio/webm" });
   setStatus(`Found ${(blob.size / (1024 * 1024)).toFixed(1)} MB of saved audio. Uploading and processing...`);
 
-  const stored = await chrome.storage.local.get(["meetingSummarizerUserId", "saveLocallyPref", "userGroqApiKey"]);
-  const userId = stored.meetingSummarizerUserId || "default-user";
+  const stored = await chrome.storage.local.get(["meetingSummarizerSession", "saveLocallyPref", "saveAudioPref"]);
+  const session = stored.meetingSummarizerSession;
   const saveLocally = Boolean(stored.saveLocallyPref);
-  const groqApiKey = stored.userGroqApiKey || "";
+  const saveAudio = Boolean(stored.saveAudioPref);
 
-  if (!groqApiKey) {
+  if (saveAudio) {
+    try { await saveAudioLocally(blob); } catch (e) { console.warn(...); }
+  }
+
+  if (!session || !session.user_id) {
     setStatus(
-      "A Groq API key is required before this can be uploaded, and none is saved yet.\n\n" +
+      "You're not logged in, so this can't be uploaded yet.\n\n" +
       "Your audio is still safely saved - nothing was lost. Open the extension popup, " +
-      "enter your Groq API key in Settings, then come back and press Retry."
+      "log into your account, then come back and press Retry."
     );
     retryBtn.classList.remove("hidden");
     return;
   }
 
-  const result = await uploadRecording(blob, { backendUrl: BACKEND_URL, userId, saveLocally, groqApiKey, onStatus: setStatus });
+  const result = await uploadRecording(blob, {
+    backendUrl: BACKEND_URL,
+    userId: session.user_id,
+    saveLocally,
+    onStatus: setStatus,
+  });
 
   if (result.success) {
-    const data = result.data;
-    let pdfNote = "";
-    if (data.pdf) {
-      if (data.pdf.data_base64) {
-        pdfNote = data.pdf.download_error
-          ? `\n\nCouldn't save the PDF locally: ${data.pdf.download_error}`
-          : `\n\nSaved locally as "${data.pdf.filename}".`;
-      } else if (data.pdf.error) {
-        pdfNote = `\n\nLocal PDF save failed: ${data.pdf.error}`;
-      }
-    }
-    setStatus(
-      "Recovered successfully.\n\nMeeting: " + data.meeting_title + "\n\n" +
-      "CRM push status: " + (data.crm_push ? data.crm_push.status : "unknown") +
-      pdfNote + "\n\nThis window will close automatically."
-    );
+    ...
     await deleteSessionFromDB(sessionId);
     await markSessionDone();
     setTimeout(() => window.close(), 8000);
   } else {
-    setStatus(
-      "Recovery upload failed: " + result.error +
-      "\n\nYour audio is still safely saved - nothing was lost. Make sure the backend " +
-      "(python main.py) is running, then press Retry."
-    );
+    setStatus("Recovery upload failed: " + result.error + "\n\nYour audio is still safely saved - nothing was lost. Make sure the backend (python main.py) is running, then press Retry.");
     retryBtn.classList.remove("hidden");
   }
 }
@@ -950,14 +960,15 @@ runRecovery();
 ```
 Step by step:
 1. If somehow no `sessionId` was passed at all, shows a message and stops (shouldn't normally happen since `background.js` always includes it when opening this window).
-2. Loads whatever audio chunks were saved to IndexedDB for this session (Section 5's `loadChunksFromDB`). If that read itself fails (IndexedDB error), shows the error and offers Retry.
-3. **If there are literally zero saved chunks** — this can legitimately happen if the window closed within the first few seconds of recording, before the first ~10-second IndexedDB flush ever happened — there's nothing to recover. This is treated as a normal (not an error) outcome: the message explains why, and the session is simply marked done.
-4. Reassembles the chunks into one `Blob` and reports its size in MB to the user, so they can see roughly how much was actually captured.
-5. Pulls the saved `user_id`, save-locally preference, and Groq key straight from `chrome.storage.local` — this window has no UI of its own for entering these, since it's meant to run unattended/automatically.
-6. **If there's no saved Groq key**, it can't proceed — but explicitly reassures the user the audio isn't lost, and tells them exactly what to do (open the extension, enter the key in Settings, come back and press Retry).
-7. Calls the same shared `uploadRecording()` helper as everywhere else (Section 5).
-8. On success: shows a detailed success message (meeting title, CRM status, PDF note — same formatting logic as `popup.js`'s success path), deletes the IndexedDB backup, marks the session done, and **auto-closes the window after 8 seconds** (`setTimeout(() => window.close(), 8000)`) — long enough for the user to actually read the result before it disappears on its own.
-9. On failure: explicit reassurance again that nothing was lost, a concrete troubleshooting hint (make sure `python main.py` is running), and reveals the Retry button.
+2. Loads whatever audio chunks were saved to IndexedDB for this session (Section 6's `loadChunksFromDB`). If that read itself fails (IndexedDB error), shows the error and offers Retry.
+3. **If there are literally zero saved chunks** — legitimate if the window closed within the first few seconds of recording, before the first ~10-second IndexedDB flush ever happened — there's nothing to recover. Treated as a normal (not an error) outcome: the message explains why, and the session is simply marked done.
+4. Reassembles the chunks into one `Blob` and reports its size in MB, so the user can see roughly how much was actually captured.
+5. Reads `meetingSummarizerSession`, the save-locally preference, and the save-audio preference straight from `chrome.storage.local` — this window has no UI of its own for logging in or changing preferences, since it's meant to run unattended/automatically.
+6. If **Save raw audio** was on, saves it locally immediately — same reasoning as `popup.js`: independent of the upload, so the original is preserved even if the network is down.
+7. **If there's no saved session (not logged in)**, it can't proceed — but explicitly reassures the user the audio isn't lost, and tells them exactly what to do (open the extension, log in, come back and press Retry). Unlike an earlier version of this flow, there is **no client-side Groq-key check here at all** — that check now lives entirely on the backend (a `400` if the account has no Groq key), since the key itself is never held or checked client-side anymore.
+8. Calls the same shared `uploadRecording()` helper as everywhere else (Section 6), passing `session.user_id` directly from storage (no `getCurrentUserId()` helper here, since `auth.js` isn't loaded in this window).
+9. **On success:** shows a detailed success message (meeting title, CRM status, PDF note — same formatting logic as `popup.js`'s success path), deletes the IndexedDB backup, marks the session done, and **auto-closes the window after 8 seconds** — long enough to actually read the result before it disappears on its own.
+10. **On failure:** explicit reassurance again that nothing was lost, a concrete troubleshooting hint (make sure `python main.py` is running), and reveals the Retry button.
 - `retryBtn` re-runs the entire `runRecovery()` function from scratch on click.
 - `closeBtn` just closes the window immediately at any time.
 - `runRecovery()` is invoked immediately at the bottom of the file — the whole flow runs automatically the instant this window opens, no user action required to kick it off.
